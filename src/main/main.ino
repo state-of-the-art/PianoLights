@@ -40,6 +40,37 @@
 #define SERVICE_UUID        "03B80E5A-EDE8-4B33-A751-6CE34EC4C700"
 #define CHARACTERISTIC_UUID "7772E5DB-3868-4112-A1A9-F2669D106BF3"
 
+// Enum
+// Taken from https://github.com/lathoub/midi-Common/blob/master/midi_Defs.h
+enum MidiType : uint8_t {
+  InvalidType           = 0x00,    ///< For notifying errors
+
+  NoteOff               = 0x80,    ///< Note Off
+  NoteOn                = 0x90,    ///< Note On
+  AfterTouchPoly        = 0xA0,    ///< Polyphonic AfterTouch
+  ControlChange         = 0xB0,    ///< Control Change / Channel Mode
+  ProgramChange         = 0xC0,    ///< Program Change
+  AfterTouchChannel     = 0xD0,    ///< Channel (monophonic) AfterTouch
+  PitchBend             = 0xE0,    ///< Pitch Bend
+
+  SystemExclusive       = 0xF0,    ///< System Exclusive
+  SystemExclusiveStart  = SystemExclusive,
+  SystemExclusiveEnd    = 0xF7,    ///< System Exclusive End
+
+  TimeCodeQuarterFrame  = 0xF1,    ///< System Common - MIDI Time Code Quarter Frame
+  SongPosition          = 0xF2,    ///< System Common - Song Position Pointer
+  SongSelect            = 0xF3,    ///< System Common - Song Select
+  TuneRequest           = 0xF6,    ///< System Common - Tune Request
+
+  Clock                 = 0xF8,    ///< System Real Time - Timing Clock
+  Tick                  = 0xF9,    ///< System Real Time - Tick
+  Start                 = 0xFA,    ///< System Real Time - Start
+  Continue              = 0xFB,    ///< System Real Time - Continue
+  Stop                  = 0xFC,    ///< System Real Time - Stop
+  ActiveSensing         = 0xFE,    ///< System Real Time - Active Sensing
+  SystemReset           = 0xFF,    ///< System Real Time - System Reset
+};
+
 /*********************************/
 /************ APP ****************/
 /*********************************/
@@ -183,8 +214,8 @@ void initAnimation() {
 BLECharacteristic *ble_characteristic;
 
 uint8_t midi_packet[] = {
-   0x80,  // header
-   0x80,  // timestamp, not implemented 
+   0x80,  // header (1 + 1 + 6 bytes of upper timestamp)
+   0x80,  // 1 + 7 bytes of lower timestamp, not implemented 
    0x00,  // status
    0x3c,  // note, 0x3c == 60 == middle c
    0x00   // velocity
@@ -199,6 +230,90 @@ class MyBLEServerCallbacks: public BLEServerCallbacks {
   void onDisconnect(BLEServer* pServer) {
     Serial.println("BLE device disconnected");
     _ble_dev_connected = false;
+  }
+};
+
+class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *characteristic) {
+    std::string rxValue = characteristic->getValue();
+    if( rxValue.length() > 0 )
+      processWrite((uint8_t *)(rxValue.c_str()), rxValue.length());
+  }
+
+  void processWrite(uint8_t *buffer, uint8_t bufferSize) {
+    // TODO: Proxy to USB raw, not working this way
+    //if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) // if( Midi ) is not working
+    //  Midi.SendRawData(bufferSize-2, &(buffer[2]));
+
+    // Logic taken from https://github.com/lathoub/Arduino-BLE-MIDI/blob/master/src/Ble_esp32.h
+    // Pointers used to search through payload.
+    uint8_t lPtr = 0;
+    uint8_t rPtr = 0;
+
+    // lastStatus used to capture runningStatus
+    uint8_t lastStatus;
+
+    // Decode first packet -- SHALL be "Full MIDI message"
+    lPtr = 2; // Start at first MIDI status -- SHALL be "MIDI status"
+
+    // While statement contains incrementing pointers and breaks when buffer size exceeded.
+    while(1) {
+      lastStatus = buffer[lPtr];
+      if( (buffer[lPtr] < 0x80) ){
+        // Status message not present, bail
+        return;
+      }
+      // Point to next non-data byte
+      rPtr = lPtr;
+      while( (buffer[rPtr + 1] < 0x80)&&(rPtr < (bufferSize - 1)) ){
+        rPtr++;
+      }
+      // look at l and r pointers and decode by size.
+      if( rPtr - lPtr < 1 ){
+        // Time code or system
+        processMIDI(lastStatus);
+      } else if( rPtr - lPtr < 2 ) {
+        processMIDI(lastStatus, buffer[lPtr + 1]);
+      } else if( rPtr - lPtr < 3 ) {
+        processMIDI(lastStatus, buffer[lPtr + 1], buffer[lPtr + 2]);
+      } else {
+        // Too much data
+        // If not System Common or System Real-Time, send it as running status
+        switch( buffer[lPtr] & 0xF0 )
+        {
+          case NoteOff:
+          case NoteOn:
+          case AfterTouchPoly:
+          case ControlChange:
+          case PitchBend:
+            for(int i = lPtr; i < rPtr; i = i + 2)
+              processMIDI(lastStatus, buffer[i + 1], buffer[i + 2]);
+            break;
+          case ProgramChange:
+          case AfterTouchChannel:
+            for(int i = lPtr; i < rPtr; i = i + 1)
+              processMIDI(lastStatus, buffer[i + 1]);
+            break;
+          default:
+            break;
+        }
+      }
+      // Point to next status
+      lPtr = rPtr + 2;
+      if(lPtr >= bufferSize){
+          // end of packet
+          return;
+      }
+    }
+  }
+
+  void processMIDI(uint8_t data0, uint8_t data1 = 0, uint8_t data2 = 0) {
+    Serial.printf("BLE data: %2X %2X %2X\n", data0, data1, data2);
+    // Proxy to USB
+    if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
+      uint8_t data[] = { data0, data1, data2 };
+      Midi.SendData(data, 3);
+    }
   }
 };
 
@@ -223,6 +338,7 @@ void initBLEMIDI() {
 
   // Create a BLE Descriptor
   ble_characteristic->addDescriptor(new BLE2902());
+  ble_characteristic->setCallbacks(new MyBLECharacteristicCallbacks());
 
   // Start the service
   service->start();
@@ -301,12 +417,13 @@ void noteOn(uint8_t note, uint8_t velocity = 0x40) {
 
 //**************************************************************************//
 // Poll USB MIDI Controler
-void MIDI_poll() {
-  uint8_t outBuf[4];
+void USBMIDI_poll() {
+  uint8_t outBuf[4]; // TODO: Actually should be 3, but for some reason it crashed when dual voicing enabled
   uint8_t size;
 
   do {
     if( (size = Midi.RecvData(outBuf)) > 0 ) {
+      // Processing lights
       if( outBuf[0] == 0xFE ) { // Timing clock
         continue; // Ignore it
       }
@@ -325,9 +442,10 @@ void MIDI_poll() {
       }
       // From: 0x15
       // To: 0x6C
-      Serial.printf("%2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
+      Serial.printf("USB data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
 
-      // Write to BLE device
+      // Proxy to BLE device
+      // TODO: proxy raw buffer to speed-up the process
       if( _ble_dev_connected ) {
         midi_packet[2] = outBuf[0]; // Channel and up/down
         midi_packet[3] = outBuf[1]; // Velocity
@@ -355,7 +473,7 @@ void loop() {
   uint32_t t1 = (uint32_t)micros();
 
   if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
-    MIDI_poll();
+    USBMIDI_poll();
   }
 
   digitalLeds_drawPixels(STRANDS, 1);
