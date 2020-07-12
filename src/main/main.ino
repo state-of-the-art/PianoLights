@@ -3,6 +3,11 @@
 #include <usbh_midi.h>
 #include <usbhub.h>
 
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+
 /*********************************/
 /********** CONFIGS **************/
 /*********************************/
@@ -31,9 +36,14 @@
 #ifdef POW_BUDGET_2000
 #endif
 
+// Defs for BLE MIDI
+#define SERVICE_UUID        "03B80E5A-EDE8-4B33-A751-6CE34EC4C700"
+#define CHARACTERISTIC_UUID "7772E5DB-3868-4112-A1A9-F2669D106BF3"
+
 /*********************************/
 /************ APP ****************/
 /*********************************/
+
 // Current pitch value: (0; 64; 127) to (-100; 0; 100)
 int8_t _pitch = 0;
 
@@ -48,6 +58,9 @@ strand_t LED_STRAND = {
   .brightLimit = 12,
   .numPixels =  KEYS_NUM * LEDS_PER_KEY
 };
+
+// BLE Device connected
+bool _ble_dev_connected = false;
 
 /********** TRANSITIONS **********/
 
@@ -167,9 +180,64 @@ void initAnimation() {
   digitalLeds_drawPixels(STRANDS, 1);
 }
 
+BLECharacteristic *ble_characteristic;
+
+uint8_t midi_packet[] = {
+   0x80,  // header
+   0x80,  // timestamp, not implemented 
+   0x00,  // status
+   0x3c,  // note, 0x3c == 60 == middle c
+   0x00   // velocity
+};
+
+class MyBLEServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    Serial.println("BLE device connected");
+    _ble_dev_connected = true;
+  };
+
+  void onDisconnect(BLEServer* pServer) {
+    Serial.println("BLE device disconnected");
+    _ble_dev_connected = false;
+  }
+};
+
+void initBLEMIDI() {
+  BLEDevice::init("PianoLights");
+
+  // Create the BLE Server
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(new MyBLEServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *service = server->createService(BLEUUID(SERVICE_UUID));
+
+  // Create a BLE Characteristic
+  ble_characteristic = service->createCharacteristic(
+    BLEUUID(CHARACTERISTIC_UUID),
+    BLECharacteristic::PROPERTY_READ   |
+    BLECharacteristic::PROPERTY_WRITE  |
+    BLECharacteristic::PROPERTY_NOTIFY |
+    BLECharacteristic::PROPERTY_WRITE_NR
+  );
+
+  // Create a BLE Descriptor
+  ble_characteristic->addDescriptor(new BLE2902());
+
+  // Start the service
+  service->start();
+
+  // Start advertising
+  BLEAdvertising *advertising = server->getAdvertising();
+  advertising->addServiceUUID(service->getUUID());
+  advertising->start();
+
+  Serial.println("BLE Init done");
+}
+
 void setup() {
   Serial.begin(115200);
-  Serial.println("Initializing...");
+  Serial.println("Initializing PianoLights...");
 
   // Reset USB
   pinMode( 15, OUTPUT);
@@ -186,9 +254,11 @@ void setup() {
 
   for( uint8_t k = 0; k < KEYS_NUM; k++ )
     _keys[k] = 0;
+
+  initBLEMIDI();
   
   delay(100);
-  Serial.println("Init complete");
+  Serial.println("Init completed");
 
   initAnimation();
 }
@@ -208,6 +278,7 @@ void updateLeds(int8_t key = -1) {
 }
 
 void pitchSet(int8_t velocity) {
+  // TODO: Use pitch to slide the LEDs
   if( velocity > 0x40 )
     _pitch = (velocity-0x40) * 16/10;
   else
@@ -231,7 +302,7 @@ void noteOn(uint8_t note, uint8_t velocity = 0x40) {
 //**************************************************************************//
 // Poll USB MIDI Controler
 void MIDI_poll() {
-  uint8_t outBuf[3];
+  uint8_t outBuf[4];
   uint8_t size;
 
   do {
@@ -256,8 +327,14 @@ void MIDI_poll() {
       // To: 0x6C
       Serial.printf("%2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
 
-      // TODO: Bluetooth MIDI Output
-      //_MIDI_SERIAL_PORT.write(outBuf, size);
+      // Write to BLE device
+      if( _ble_dev_connected ) {
+        midi_packet[2] = outBuf[0]; // Channel and up/down
+        midi_packet[3] = outBuf[1]; // Velocity
+        midi_packet[4] = outBuf[2]; // Note
+        ble_characteristic->setValue(midi_packet, 5);
+        ble_characteristic->notify();
+      }
     }
   } while( size > 0 );
 }
