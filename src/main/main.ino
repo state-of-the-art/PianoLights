@@ -79,7 +79,7 @@ enum MidiType : uint8_t {
 int8_t _pitch = 0;
 
 // Pressed keys: value is velocity 0-127
-uint8_t _keys[KEYS_NUM]; 
+uint8_t _keys[KEYS_NUM];
 
 // Definition of the led string
 strand_t LED_STRAND = {
@@ -241,10 +241,6 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
   }
 
   void processWrite(uint8_t *buffer, uint8_t bufferSize) {
-    // TODO: Proxy to USB raw, not working this way
-    //if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) // if( Midi ) is not working
-    //  Midi.SendRawData(bufferSize-2, &(buffer[2]));
-
     // Logic taken from https://github.com/lathoub/Arduino-BLE-MIDI/blob/master/src/Ble_esp32.h
     // Pointers used to search through payload.
     uint8_t lPtr = 0;
@@ -269,7 +265,7 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
         rPtr++;
       }
       // look at l and r pointers and decode by size.
-      if( rPtr - lPtr < 1 ){
+      if( rPtr - lPtr < 1 ) {
         // Time code or system
         processMIDI(lastStatus);
       } else if( rPtr - lPtr < 2 ) {
@@ -300,7 +296,7 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
       }
       // Point to next status
       lPtr = rPtr + 2;
-      if(lPtr >= bufferSize){
+      if( lPtr >= bufferSize ) {
           // end of packet
           return;
       }
@@ -312,7 +308,31 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
     // Proxy to USB
     if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
       uint8_t data[] = { data0, data1, data2 };
-      Midi.SendData(data, 3);
+      Midi.SendData(data, 0);
+    }
+
+    // Check the 16th channel on key lights
+    if( (data0 & 0b1111) == 0xF ) {
+      switch( data0 & 0xF0 )
+      {
+        case NoteOff:
+          // TODO: release velocity
+          noteOff(data1);
+          break;
+        case NoteOn:
+          if( data2 == 0 )
+            noteOff(data1);
+          else
+            noteGhost(data1);
+          break;
+        case AfterTouchPoly:
+        case ControlChange:
+        case PitchBend:
+        case ProgramChange:
+        case AfterTouchChannel:
+        default:
+          break;
+      }
     }
   }
 };
@@ -372,7 +392,7 @@ void setup() {
     _keys[k] = 0;
 
   initBLEMIDI();
-  
+
   delay(100);
   Serial.println("Init completed");
 
@@ -415,6 +435,12 @@ void noteOn(uint8_t note, uint8_t velocity = 0x40) {
   updateLeds(note-0x15);
 }
 
+void noteGhost(uint8_t note) {
+  pixelColor_t color = pixelFromRGB(5, 5, 5);
+  LED_STRAND.pixels[(note-0x15)*2] = color;
+  LED_STRAND.pixels[(note-0x15)*2+1] = color;
+}
+
 //**************************************************************************//
 // Poll USB MIDI Controler
 void USBMIDI_poll() {
@@ -427,25 +453,33 @@ void USBMIDI_poll() {
       if( outBuf[0] == 0xFE ) { // Timing clock
         continue; // Ignore it
       }
-      else if( outBuf[0] >= 0x80 && outBuf[0] < 0x90 ) { // 0x8x Note off
-        // TODO: release velocity
-        noteOff(outBuf[1]);
-      }
-      else if( outBuf[0] < 0xA0 ) { // 0x9x Note on
-        if( outBuf[2] == 0 )
+      switch( outBuf[0] & 0xF0 )
+      {
+        case NoteOff:
+          // TODO: release velocity
           noteOff(outBuf[1]);
-        else
-          noteOn(outBuf[1], outBuf[2]);
+          break;
+        case NoteOn:
+          if( outBuf[2] == 0 )
+            noteOff(outBuf[1]);
+          else
+            noteOn(outBuf[1], outBuf[2]);
+          break;
+        case AfterTouchPoly:
+        case ControlChange:
+        case PitchBend:
+          // From: 0x15
+          // To: 0x6C
+          pitchSet(outBuf[2]);
+          break;
+        case ProgramChange:
+        case AfterTouchChannel:
+        default:
+          break;
       }
-      else if( outBuf[0] == 0xE0 ) { // 0xEx Pitch
-        pitchSet(outBuf[2]);
-      }
-      // From: 0x15
-      // To: 0x6C
       Serial.printf("USB data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
 
-      // Proxy to BLE device
-      // TODO: proxy raw buffer to speed-up the process
+      // Proxy to BLE
       if( _ble_dev_connected ) {
         midi_packet[2] = outBuf[0]; // Channel and up/down
         midi_packet[3] = outBuf[1]; // Velocity
