@@ -1,13 +1,3 @@
-#include "esp32_digital_led_lib.h"
-
-#include <usbh_midi.h>
-#include <usbhub.h>
-
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-#include <BLE2902.h>
-
 /*********************************/
 /********** CONFIGS **************/
 /*********************************/
@@ -24,8 +14,17 @@
 
 #define LEDS_PER_KEY 2
 
+/*********************************/
+/*********** INIT ****************/
+/*********************************/
+
+#include "esp32_digital_led_lib.h"
+
+#include <usbh_midi.h>
+#include <usbhub.h>
+
 #ifdef POW_BUDGET_200
-// Total max is 50x32 for green channel with USB host and no BT
+// Total max is 50x32 for green channel with USB host and no BLE
 #  define MAX_SIM_LEDS 40
 #  define MAX_LED_POWER 32
 #endif
@@ -36,7 +35,10 @@
 #ifdef POW_BUDGET_2000
 #endif
 
-// Defs for BLE MIDI
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
 #define SERVICE_UUID        "03B80E5A-EDE8-4B33-A751-6CE34EC4C700"
 #define CHARACTERISTIC_UUID "7772E5DB-3868-4112-A1A9-F2669D106BF3"
 
@@ -213,12 +215,23 @@ void initAnimation() {
 
 BLECharacteristic *ble_characteristic;
 
-uint8_t midi_packet[] = {
-   0x80,  // header (1 + 1 + 6 bytes of upper timestamp)
-   0x80,  // 1 + 7 bytes of lower timestamp, not implemented 
-   0x00,  // status
-   0x3c,  // note, 0x3c == 60 == middle c
-   0x00   // velocity
+// Structures to proxy from BLE to USB
+portMUX_TYPE usb_midi_packet_mux = portMUX_INITIALIZER_UNLOCKED;
+uint16_t usb_midi_packet_size = 0;
+uint8_t usb_midi_packet[512] = {
+  //0x00,  // 4b Channel + type
+  //0x00,  // status
+  //0x3c,  // note, 0x3c == 60 == middle c
+  //0x00   // velocity
+};
+
+// Structure to proxy from USB to BLE
+uint8_t ble_midi_packet[512] = {
+  0x80,  // header (1 + 1 + 6 bytes of upper timestamp)
+  //0x80,  // 1 + 7 bytes of lower timestamp, not implemented 
+  //0x00,  // status
+  //0x3c,  // note, 0x3c == 60 == middle c
+  //0x00   // velocity
 };
 
 class MyBLEServerCallbacks: public BLEServerCallbacks {
@@ -257,13 +270,14 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
       lastStatus = buffer[lPtr];
       if( (buffer[lPtr] < 0x80) ){
         // Status message not present, bail
-        return;
+        break;
       }
       // Point to next non-data byte
       rPtr = lPtr;
       while( (buffer[rPtr + 1] < 0x80)&&(rPtr < (bufferSize - 1)) ){
         rPtr++;
       }
+
       // look at l and r pointers and decode by size.
       if( rPtr - lPtr < 1 ) {
         // Time code or system
@@ -298,32 +312,36 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
       lPtr = rPtr + 2;
       if( lPtr >= bufferSize ) {
           // end of packet
-          return;
+          break;
       }
     }
   }
 
   void processMIDI(uint8_t data0, uint8_t data1 = 0, uint8_t data2 = 0) {
-    Serial.printf("BLE data: %2X %2X %2X\n", data0, data1, data2);
+    Serial.printf("BLE->USB data: %2X %2X %2X\n", data0, data1, data2);
     // Proxy to USB
-    if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
-      uint8_t data[] = { data0, data1, data2 };
-      Midi.SendData(data, 0);
-    }
+    portENTER_CRITICAL_ISR(&usb_midi_packet_mux);
+      usb_midi_packet[usb_midi_packet_size++] = Midi.lookupMsgSize(data0); // Proxy using cable 0
+      usb_midi_packet[usb_midi_packet_size++] = data0;
+      usb_midi_packet[usb_midi_packet_size++] = data1;
+      usb_midi_packet[usb_midi_packet_size++] = data2;
+    portEXIT_CRITICAL_ISR(&usb_midi_packet_mux);
 
     // Check the 16th channel on key lights
     if( (data0 & 0b1111) == 0xF ) {
       switch( data0 & 0xF0 )
       {
         case NoteOff:
-          // TODO: release velocity
-          noteOff(data1);
+          if( _keys[data1-KEYS_SHIFT] == 0x00 )
+            noteOff(data1);
           break;
         case NoteOn:
-          if( data2 == 0 )
-            noteOff(data1);
-          else
-            noteGhost(data1);
+          if( _keys[data1-KEYS_SHIFT] == 0x00 ) {
+            if( data2 == 0 )
+              noteOff(data1);
+            else
+              noteGhost(data1);
+          }
           break;
         case AfterTouchPoly:
         case ControlChange:
@@ -338,7 +356,7 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
 };
 
 void initBLEMIDI() {
-  BLEDevice::init("PianoLights");
+  BLEDevice::init("PianoLights BLE");
 
   // Create the BLE Server
   BLEServer *server = BLEDevice::createServer();
@@ -407,7 +425,7 @@ void setLeds(uint8_t key) {
 
 void updateLeds(int8_t key = -1) {
   if( key < 0 ) {
-    for( uint8_t k; k < KEYS_NUM; k++ )
+    for( uint8_t k = 0; k < KEYS_NUM; k++ )
       setLeds(k);
   } else
     setLeds(key);
@@ -432,13 +450,13 @@ void noteOn(uint8_t note, uint8_t velocity = 0x40) {
   // TODO: use pitch to find the correct location
   // TODO: blue->green->red depends on the velocity
   _keys[note-KEYS_SHIFT] = velocity;
-  updateLeds(note-0x15);
+  updateLeds(note-KEYS_SHIFT);
 }
 
 void noteGhost(uint8_t note) {
   pixelColor_t color = pixelFromRGB(5, 5, 5);
-  LED_STRAND.pixels[(note-0x15)*2] = color;
-  LED_STRAND.pixels[(note-0x15)*2+1] = color;
+  LED_STRAND.pixels[(note-KEYS_SHIFT)*2] = color;
+  LED_STRAND.pixels[(note-KEYS_SHIFT)*2+1] = color;
 }
 
 //**************************************************************************//
@@ -446,49 +464,60 @@ void noteGhost(uint8_t note) {
 void USBMIDI_poll() {
   uint8_t outBuf[4]; // TODO: Actually should be 3, but for some reason it crashed when dual voicing enabled
   uint8_t size;
+  uint16_t ble_midi_packet_size = 0;
 
   do {
-    if( (size = Midi.RecvData(outBuf)) > 0 ) {
-      // Processing lights
-      if( outBuf[0] == 0xFE ) { // Timing clock
-        continue; // Ignore it
-      }
-      switch( outBuf[0] & 0xF0 )
-      {
-        case NoteOff:
-          // TODO: release velocity
-          noteOff(outBuf[1]);
-          break;
-        case NoteOn:
-          if( outBuf[2] == 0 )
-            noteOff(outBuf[1]);
-          else
-            noteOn(outBuf[1], outBuf[2]);
-          break;
-        case AfterTouchPoly:
-        case ControlChange:
-        case PitchBend:
-          // From: 0x15
-          // To: 0x6C
-          pitchSet(outBuf[2]);
-          break;
-        case ProgramChange:
-        case AfterTouchChannel:
-        default:
-          break;
-      }
-      Serial.printf("USB data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
+    if( (size = Midi.RecvData(outBuf)) == 0 )
+      break;
 
-      // Proxy to BLE
-      if( _ble_dev_connected ) {
-        midi_packet[2] = outBuf[0]; // Channel and up/down
-        midi_packet[3] = outBuf[1]; // Velocity
-        midi_packet[4] = outBuf[2]; // Note
-        ble_characteristic->setValue(midi_packet, 5);
-        ble_characteristic->notify();
+    // Processing lights
+    if( outBuf[0] == 0xFE ) { // Timing clock
+      continue; // Ignore it
+    }
+    switch( outBuf[0] & 0xF0 )
+    {
+      case NoteOff:
+        // TODO: release velocity
+        noteOff(outBuf[1]);
+        break;
+      case NoteOn:
+        if( outBuf[2] == 0 )
+          noteOff(outBuf[1]);
+        else
+          noteOn(outBuf[1], outBuf[2]);
+        break;
+      case PitchBend:
+        // From: 0x15
+        // To: 0x6C
+        pitchSet(outBuf[2]);
+        break;
+      case AfterTouchPoly:
+      case ControlChange:
+      case ProgramChange:
+      case AfterTouchChannel:
+      default:
+        break;
+    }
+    Serial.printf("USB->BLE data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
+
+    // Proxy to BLE
+    if( _ble_dev_connected ) {
+      // Check is not running MIDI status
+      if( !(ble_midi_packet_size > 2 && ble_midi_packet[ble_midi_packet_size-2] == outBuf[0]) ) {
+        ble_midi_packet[++ble_midi_packet_size] = 0x80; // timestamp
+        ble_midi_packet[++ble_midi_packet_size] = outBuf[0]; // Status
       }
+      ble_midi_packet[++ble_midi_packet_size] = outBuf[1]; // Velocity
+      ble_midi_packet[++ble_midi_packet_size] = outBuf[2]; // Note
     }
   } while( size > 0 );
+
+  if( _ble_dev_connected && ble_midi_packet_size > 0 ) {
+    Serial.printf("USB->BLE sending: %i\n", ble_midi_packet_size+1);
+    ble_characteristic->setValue(ble_midi_packet, ble_midi_packet_size+1);
+    ble_characteristic->notify();
+    Serial.printf("USB->BLE data sent: %i\n", ble_midi_packet_size+1);
+  }
 }
 
 // Delay time (max 16383 us)
@@ -501,6 +530,21 @@ void doDelay(uint32_t t1, uint32_t t2, uint32_t delayTime) {
   }
 }
 
+void sendBLEUSB() {
+    // Proxy BLE->USB
+    if( usb_midi_packet_size > 0 ) {
+      portENTER_CRITICAL(&usb_midi_packet_mux);
+        /*Serial.printf("BLE->USB data sending: %i", usb_midi_packet_size);
+        for( uint8_t i = 0; i<usb_midi_packet_size; i++ )
+          Serial.printf(" %02X", usb_midi_packet[i]);
+        Serial.println("");*/
+        Midi.SendRawData(usb_midi_packet_size, usb_midi_packet);
+        usb_midi_packet_size = 0;
+        //Serial.printf("BLE->USB data sent: %i\n", usb_midi_packet_size);
+      portEXIT_CRITICAL(&usb_midi_packet_mux);
+    }
+}
+
 //**************************************************************************//
 void loop() {
   Usb.Task();
@@ -508,6 +552,7 @@ void loop() {
 
   if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
     USBMIDI_poll();
+    sendBLEUSB();
   }
 
   digitalLeds_drawPixels(STRANDS, 1);
