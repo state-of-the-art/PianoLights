@@ -6,13 +6,20 @@
 //#define POW_BUDGET_1000 // direct usb 3.0 1A max
 //#define POW_BUDGET_2000 // power adapter 2A
 
-#define colorWheel(wheel_pos) colorWheelBG(wheel_pos)
+// Color transition depends on velocity
+#define colorWheel(wheel_pos) colorWheelBGR(wheel_pos)
 
+// Where is C3
 #define KEYS_SHIFT 0x15
 
+// Piano keys number
 #define KEYS_NUM 88
 
+// Number of leds per key
 #define LEDS_PER_KEY 2
+
+// Color of the ghost note (tip, sent from BLE side on 16th channel)
+#define GHOST_COLOR pixelFromRGB(5, 5, 5)
 
 /*********************************/
 /*********** INIT ****************/
@@ -24,15 +31,20 @@
 #include <usbhub.h>
 
 #ifdef POW_BUDGET_200
-// Total max is 50x32 for green channel with USB host and no BLE
 #  define MAX_SIM_LEDS 40
 #  define MAX_LED_POWER 32
 #endif
 #ifdef POW_BUDGET_500
+#  define MAX_SIM_LEDS 40
+#  define MAX_LED_POWER 32
 #endif
 #ifdef POW_BUDGET_1000
+#  define MAX_SIM_LEDS 40
+#  define MAX_LED_POWER 32
 #endif
 #ifdef POW_BUDGET_2000
+#  define MAX_SIM_LEDS 40
+#  define MAX_LED_POWER 32
 #endif
 
 #include <BLEDevice.h>
@@ -81,7 +93,11 @@ enum MidiType : uint8_t {
 int8_t _pitch = 0;
 
 // Pressed keys: value is velocity 0-127
-uint8_t _keys[KEYS_NUM];
+uint8_t _keys_user[KEYS_NUM];
+bool _keys_ghost[KEYS_NUM];
+
+// Number of active leds
+uint8_t _leds_active = 0;
 
 // Definition of the led string
 strand_t LED_STRAND = {
@@ -130,6 +146,8 @@ pixelColor_t colorWheelBGR(int8_t wheel_pos) {
 
   return pixelFromRGB(r, g, b);
 }
+
+/********** MAIN LOGIC **********/
 
 USB Usb;
 USBH_MIDI Midi(&Usb);
@@ -318,7 +336,7 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
   }
 
   void processMIDI(uint8_t data0, uint8_t data1 = 0, uint8_t data2 = 0) {
-    Serial.printf("BLE->USB data: %2X %2X %2X\n", data0, data1, data2);
+    //Serial.printf("BLE->USB data: %2X %2X %2X\n", data0, data1, data2);
     // Proxy to USB
     portENTER_CRITICAL_ISR(&usb_midi_packet_mux);
       usb_midi_packet[usb_midi_packet_size++] = Midi.lookupMsgSize(data0); // Proxy using cable 0
@@ -332,16 +350,13 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
       switch( data0 & 0xF0 )
       {
         case NoteOff:
-          if( _keys[data1-KEYS_SHIFT] == 0x00 )
-            noteOff(data1);
+          signalNoteGhostOff(data1);
           break;
         case NoteOn:
-          if( _keys[data1-KEYS_SHIFT] == 0x00 ) {
-            if( data2 == 0 )
-              noteOff(data1);
-            else
-              noteGhost(data1);
-          }
+          if( data2 == 0 )
+            signalNoteGhostOff(data1);
+          else
+            signalNoteGhostOn(data1);
           break;
         case AfterTouchPoly:
         case ControlChange:
@@ -406,8 +421,10 @@ void setup() {
     while( true );
   }
 
-  for( uint8_t k = 0; k < KEYS_NUM; k++ )
-    _keys[k] = 0;
+  for( uint8_t k = 0; k < KEYS_NUM; k++ ) {
+    _keys_user[k] = 0;
+    _keys_ghost[k] = false;
+  }
 
   initBLEMIDI();
 
@@ -418,9 +435,16 @@ void setup() {
 }
 
 void setLeds(uint8_t key) {
-  pixelColor_t color = _keys[key] > 0 ? colorWheel(_keys[key]) : pixelFromRGB(0, 0, 0);
-  LED_STRAND.pixels[key*2] = color;
-  LED_STRAND.pixels[key*2+1] = color;
+  pixelColor_t color;
+  if( _keys_user[key] > 0 )
+    color = colorWheel(_keys_user[key]);
+  else if( _keys_ghost[key] )
+    color = GHOST_COLOR;
+  else
+    color = pixelFromRGB(0, 0, 0);
+
+  LED_STRAND.pixels[key*LEDS_PER_KEY] = color;
+  LED_STRAND.pixels[key*LEDS_PER_KEY+1] = color;
 }
 
 void updateLeds(int8_t key = -1) {
@@ -433,30 +457,68 @@ void updateLeds(int8_t key = -1) {
 
 void pitchSet(int8_t velocity) {
   // TODO: Use pitch to slide the LEDs
-  if( velocity > 0x40 )
+  /*if( velocity > 0x40 )
     _pitch = (velocity-0x40) * 16/10;
   else
     _pitch = (velocity-0x40) * 157/100;
-  updateLeds();
+  updateLeds();*/
 }
 
-void noteOff(uint8_t note) {
-  _keys[note-KEYS_SHIFT] = 0x0;
-  updateLeds(note-KEYS_SHIFT);
+void signalNoteOff(uint8_t note) {
+  uint8_t key = note-KEYS_SHIFT;
+  if( _keys_user[key] != 0x00 ) {
+    // Disable only user key - the ghost key will be disabled when the user press key
+    _keys_user[key] = 0x00;
+    if( !_keys_ghost[key] )
+      _leds_active -= LEDS_PER_KEY;
+  } else if( _keys_ghost[key] ) {
+    _keys_ghost[key] = false;
+    _leds_active -= LEDS_PER_KEY;
+  } else
+    return; // Is not set already
+  updateLeds(key);
 }
 
-void noteOn(uint8_t note, uint8_t velocity = 0x40) {
-  // TODO: make sure POW_BUDGET is not excessed
-  // TODO: use pitch to find the correct location
-  // TODO: blue->green->red depends on the velocity
-  _keys[note-KEYS_SHIFT] = velocity;
-  updateLeds(note-KEYS_SHIFT);
+void signalNoteGhostOff(uint8_t note) {
+  uint8_t key = note-KEYS_SHIFT;
+  if( _keys_ghost[key] ) {
+    _keys_ghost[key] = false;
+    if( _keys_user[key] == 0x00 )
+      _leds_active -= LEDS_PER_KEY;
+  } else
+    return; // Leave the user key as is
+  updateLeds(key);
 }
 
-void noteGhost(uint8_t note) {
-  pixelColor_t color = pixelFromRGB(5, 5, 5);
-  LED_STRAND.pixels[(note-KEYS_SHIFT)*2] = color;
-  LED_STRAND.pixels[(note-KEYS_SHIFT)*2+1] = color;
+void signalNoteOn(uint8_t note, uint8_t velocity = 0x40) {
+  // Check the power budget
+  if( _leds_active >= MAX_SIM_LEDS )
+    return;
+
+  uint8_t key = note-KEYS_SHIFT;
+  if( _keys_ghost[key] )
+    _keys_ghost[key] = false; // Disable ghost if user pressed the key
+  else if( _keys_user[key] == 0x00 )
+    _leds_active += LEDS_PER_KEY;
+  else
+    return; // Already set - no need to reset it
+
+  _keys_user[key] = velocity;
+  updateLeds(key);
+}
+
+void signalNoteGhostOn(uint8_t note) {
+  if( _leds_active >= MAX_SIM_LEDS )
+    return;
+
+  uint8_t key = note-KEYS_SHIFT;
+  if( _keys_ghost[key] )
+    return; // Already set - no need to reset it
+  else if( _keys_user[key] == 0x00 )
+    _leds_active += LEDS_PER_KEY;
+
+  _keys_ghost[key] = true;
+  updateLeds(key);
 }
 
 //**************************************************************************//
@@ -478,13 +540,13 @@ void USBMIDI_poll() {
     {
       case NoteOff:
         // TODO: release velocity
-        noteOff(outBuf[1]);
+        signalNoteOff(outBuf[1]);
         break;
       case NoteOn:
         if( outBuf[2] == 0 )
-          noteOff(outBuf[1]);
+          signalNoteOff(outBuf[1]);
         else
-          noteOn(outBuf[1], outBuf[2]);
+          signalNoteOn(outBuf[1], outBuf[2]);
         break;
       case PitchBend:
         // From: 0x15
@@ -498,7 +560,7 @@ void USBMIDI_poll() {
       default:
         break;
     }
-    Serial.printf("USB->BLE data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
+    //Serial.printf("USB->BLE data: %2X %2X %2X\n", outBuf[0], outBuf[1], outBuf[2]);
 
     // Proxy to BLE
     if( _ble_dev_connected ) {
@@ -513,10 +575,10 @@ void USBMIDI_poll() {
   } while( size > 0 );
 
   if( _ble_dev_connected && ble_midi_packet_size > 0 ) {
-    Serial.printf("USB->BLE sending: %i\n", ble_midi_packet_size+1);
+    //Serial.printf("USB->BLE sending: %i\n", ble_midi_packet_size+1);
     ble_characteristic->setValue(ble_midi_packet, ble_midi_packet_size+1);
     ble_characteristic->notify();
-    Serial.printf("USB->BLE data sent: %i\n", ble_midi_packet_size+1);
+    //Serial.printf("USB->BLE data sent: %i\n", ble_midi_packet_size+1);
   }
 }
 
@@ -553,6 +615,27 @@ void loop() {
   if( Usb.getUsbTaskState() == USB_STATE_RUNNING ) { // if( Midi ) is not working
     USBMIDI_poll();
     sendBLEUSB();
+  }
+
+  // The leds calculations could be improper - so update if it's overflowing
+  if( _leds_active > MAX_SIM_LEDS ) {
+    Serial.printf("WARN: too much led is used - resetting %i to ", _leds_active);
+    uint8_t leds_act = 0;
+    for( uint8_t k = 0; k < KEYS_NUM; k++ ) {
+      if( _keys_user[k] > 0x00 || _keys_ghost[k] )
+        leds_act += LEDS_PER_KEY;
+    }
+    Serial.printf("%i \r\n", leds_act);
+    if( leds_act > MAX_SIM_LEDS ) {
+      Serial.printf("ERROR: Still too much - resetting the led strip & keys");
+      for( uint8_t k = 0; k < KEYS_NUM; k++ ) {
+        _keys_user[k] = 0x00;
+        _keys_ghost[k] = false;
+      }
+      updateLeds();
+      _leds_active = 0;
+    } else
+      _leds_active = leds_act;
   }
 
   digitalLeds_drawPixels(STRANDS, 1);
