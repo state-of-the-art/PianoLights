@@ -283,6 +283,13 @@ class MyBLECharacteristicCallbacks: public BLECharacteristicCallbacks {
     // Decode first packet -- SHALL be "Full MIDI message"
     lPtr = 2; // Start at first MIDI status -- SHALL be "MIDI status"
 
+    // TODO: seems like the usb_midi_packet buffer realization I'm using is not
+    // working properly without some debug... Need to figure out what's wrong.
+    Serial.printf("BLE data received %i: ", bufferSize);
+    for( uint8_t i = 0; i<bufferSize; i++ )
+      Serial.printf(" %02X", buffer[i]);
+    Serial.println("");
+
     // While statement contains incrementing pointers and breaks when buffer size exceeded.
     while(1) {
       lastStatus = buffer[lPtr];
@@ -595,14 +602,13 @@ void doDelay(uint32_t t1, uint32_t t2, uint32_t delayTime) {
 void sendBLEUSB() {
     // Proxy BLE->USB
     if( usb_midi_packet_size > 0 ) {
+      /*Serial.printf("BLE->USB data sending %i: ", usb_midi_packet_size);
+      for( uint8_t i = 0; i<usb_midi_packet_size; i++ )
+        Serial.printf(" %02X", usb_midi_packet[i]);
+      Serial.println("");*/
       portENTER_CRITICAL(&usb_midi_packet_mux);
-        /*Serial.printf("BLE->USB data sending: %i", usb_midi_packet_size);
-        for( uint8_t i = 0; i<usb_midi_packet_size; i++ )
-          Serial.printf(" %02X", usb_midi_packet[i]);
-        Serial.println("");*/
         Midi.SendRawData(usb_midi_packet_size, usb_midi_packet);
         usb_midi_packet_size = 0;
-        //Serial.printf("BLE->USB data sent: %i\n", usb_midi_packet_size);
       portEXIT_CRITICAL(&usb_midi_packet_mux);
     }
 }
