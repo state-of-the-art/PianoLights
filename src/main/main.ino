@@ -1,7 +1,9 @@
 /*********************************/
 /********** CONFIGS **************/
 /*********************************/
-#define POW_BUDGET_200 // Passive usb hub or something with no good power
+
+//#define POW_BUDGET_100 // Passive usb hub or something with a little power
+#define POW_BUDGET_200 // Enough power, but not much
 //#define POW_BUDGET_500 // direct usb 2.0 0.5A max
 //#define POW_BUDGET_1000 // direct usb 3.0 1A max
 //#define POW_BUDGET_2000 // power adapter 2A
@@ -30,21 +32,25 @@
 #include <usbh_midi.h>
 #include <usbhub.h>
 
-#ifdef POW_BUDGET_200
+#ifdef POW_BUDGET_100
 #  define MAX_SIM_LEDS 40
 #  define MAX_LED_POWER 32
+#endif
+#ifdef POW_BUDGET_200
+#  define MAX_SIM_LEDS 50
+#  define MAX_LED_POWER 64
 #endif
 #ifdef POW_BUDGET_500
-#  define MAX_SIM_LEDS 40
-#  define MAX_LED_POWER 32
+#  define MAX_SIM_LEDS 60
+#  define MAX_LED_POWER 128
 #endif
 #ifdef POW_BUDGET_1000
-#  define MAX_SIM_LEDS 40
-#  define MAX_LED_POWER 32
+#  define MAX_SIM_LEDS 70
+#  define MAX_LED_POWER 192
 #endif
 #ifdef POW_BUDGET_2000
-#  define MAX_SIM_LEDS 40
-#  define MAX_LED_POWER 32
+#  define MAX_SIM_LEDS 80
+#  define MAX_LED_POWER 240
 #endif
 
 #include <BLEDevice.h>
