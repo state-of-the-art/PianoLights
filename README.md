@@ -3,6 +3,10 @@
 Bluetooth MIDI device to power led strip and highlight the usb-midi piano keys. If you like Rousseao
 youtube channel with nice piano lights - it's your way to get the similar effect.
 
+![img](doc/img01.jpg)
+
+<img src="doc/img02.jpg" height="200"/><img src="doc/img03.jpg" height="200"/><img src="doc/schema.png" height="200"/>
+
 ## Hardware
 
 * MC: ESP32 Dev Board (MELIFE ESP32 ESP-32S Development Board 2.4GHz Dual-Mode WiFi + BT)
@@ -11,7 +15,7 @@ youtube channel with nice piano lights - it's your way to get the similar effect
 * RGB LED strip: WS2812B RGB 5050SMD Individual Addressable 3.3FT 144(2X72) Pixels/m
 * 22 AWG 3-wire cable line
 * LED channel: Muzata Black LED Channel System, Smoke Transparent Diffuser, 6.6FT/2Meter U Shape U1SW BB 2M,LU1 L2M
-* Soldering iron, some wires, capacitor 430nF/25V & resistor 330Ohm, double tape to stick 2 boards together
+* Soldering iron, some wires, capacitor 470μF/25V & resistor 330Ohm, double tape to stick 2 boards together
 
 ## Features
 
