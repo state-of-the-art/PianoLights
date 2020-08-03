@@ -1,5 +1,7 @@
 # PianoLights
 
+[![Join the chat at https://gitter.im/state-of-the-art/PianoLights](https://badges.gitter.im/state-of-the-art/PianoLights.svg)](https://gitter.im/state-of-the-art/PianoLights?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 Bluetooth MIDI device to power led strip and highlight the usb-midi piano keys. If you like Rousseao
 youtube channel with nice piano lights - it's your way to get the similar effect.
 
